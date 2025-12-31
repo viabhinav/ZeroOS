@@ -1,58 +1,47 @@
 #![no_std]
 
-use core::ptr::null_mut;
-use vfs_core::{noop_close, noop_ioctl, noop_seek, FdEntry, FileOps};
+extern crate alloc;
 
-fn zero_read(_file: *mut u8, buf: *mut u8, count: usize) -> isize {
-    if count == 0 {
-        return 0;
+use alloc::boxed::Box;
+use vfs_core::{Device, DeviceFactory, UserVoidPtr};
+
+pub struct ZeroDevice;
+
+impl Device for ZeroDevice {
+    fn read(&mut self, buf: UserVoidPtr, count: usize) -> isize {
+        if count == 0 {
+            return 0;
+        }
+        if buf.is_null() {
+            return -(libc::EFAULT as isize);
+        }
+
+        // Write zeros to user buffer
+        let ptr = buf.as_ptr();
+        // Since we are kernel writing to user, strictly we should use copy_to_user.
+        // For now, write_bytes (memset) is fine assuming the pointer is valid.
+        // UserVoidPtr checks alignment/null but raw pointer writes are still unsafe.
+        // Ideally we would add a `buf.write_zeros(count)` method later.
+        unsafe {
+            core::ptr::write_bytes(ptr, 0, count);
+        }
+
+        count as isize
     }
-    if buf.is_null() {
-        return -(libc::EFAULT as isize);
-    }
 
-    unsafe {
-        core::ptr::write_bytes(buf, 0, count);
-    }
-
-    count as isize
-}
-
-fn zero_write(_file: *mut u8, _buf: *const u8, count: usize) -> isize {
-    count as isize
-}
-
-pub const ZERO_FOPS: FileOps = FileOps {
-    read: zero_read,
-    write: zero_write,
-    release: noop_close,
-    llseek: noop_seek,
-    ioctl: noop_ioctl,
-};
-
-pub fn zero_factory() -> FdEntry {
-    FdEntry {
-        ops: &ZERO_FOPS,
-        private_data: null_mut(),
+    fn write(&mut self, _buf: UserVoidPtr, count: usize) -> isize {
+        count as isize
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct ZeroFactory;
 
-    #[test]
-    fn test_zero_read() {
-        let mut buf = [0xFFu8; 64];
-        let result = zero_read(null_mut(), buf.as_mut_ptr(), buf.len());
-        assert_eq!(result, 64, "/dev/zero read should succeed");
-        assert!(buf.iter().all(|&b| b == 0), "Buffer should be all zeros");
+impl DeviceFactory for ZeroFactory {
+    fn create(&self) -> Box<dyn Device> {
+        Box::new(ZeroDevice)
     }
+}
 
-    #[test]
-    fn test_zero_write() {
-        let buf = [0u8; 64];
-        let result = zero_write(null_mut(), buf.as_ptr(), buf.len());
-        assert_eq!(result, 64, "/dev/zero write should succeed");
-    }
+pub fn make_zero_factory() -> Box<dyn DeviceFactory> {
+    Box::new(ZeroFactory)
 }

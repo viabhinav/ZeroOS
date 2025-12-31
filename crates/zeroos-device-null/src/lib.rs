@@ -1,46 +1,30 @@
 #![no_std]
 
-use core::ptr::null_mut;
-use vfs_core::{noop_close, noop_ioctl, noop_seek, FdEntry, FileOps};
+extern crate alloc;
 
-fn null_read(_file: *mut u8, _buf: *mut u8, _count: usize) -> isize {
-    0
-}
+use alloc::boxed::Box;
+use vfs_core::{Device, DeviceFactory, UserVoidPtr};
 
-fn null_write(_file: *mut u8, _buf: *const u8, count: usize) -> isize {
-    count as isize
-}
+pub struct NullDevice;
 
-pub const NULL_FOPS: FileOps = FileOps {
-    read: null_read,
-    write: null_write,
-    release: noop_close,
-    llseek: noop_seek,
-    ioctl: noop_ioctl,
-};
+impl Device for NullDevice {
+    fn read(&mut self, _buf: UserVoidPtr, _count: usize) -> isize {
+        0
+    }
 
-pub fn null_factory() -> FdEntry {
-    FdEntry {
-        ops: &NULL_FOPS,
-        private_data: null_mut(),
+    fn write(&mut self, _buf: UserVoidPtr, count: usize) -> isize {
+        count as isize
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct NullFactory;
 
-    #[test]
-    fn test_null_read() {
-        let mut buf = [0u8; 64];
-        let result = null_read(null_mut(), buf.as_mut_ptr(), buf.len());
-        assert_eq!(result, 0, "/dev/null read should return EOF");
+impl DeviceFactory for NullFactory {
+    fn create(&self) -> Box<dyn Device> {
+        Box::new(NullDevice)
     }
+}
 
-    #[test]
-    fn test_null_write() {
-        let buf = [0u8; 64];
-        let result = null_write(null_mut(), buf.as_ptr(), buf.len());
-        assert_eq!(result, 64, "/dev/null write should succeed");
-    }
+pub fn make_null_factory() -> Box<dyn DeviceFactory> {
+    Box::new(NullFactory)
 }

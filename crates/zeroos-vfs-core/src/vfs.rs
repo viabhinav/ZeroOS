@@ -1,12 +1,22 @@
 use crate::{DeviceFactory, Fd, FdEntry, VfsResult};
+use foundation::ioctl::IoctlCommand;
+use foundation::user_ptr::{UserPtr, UserVoidPtr};
 use foundation::utils::GlobalCell;
 
+use alloc::boxed::Box;
+
 const MAX_FDS: usize = 256;
+
+// We need a way to store factories dynamically
 
 pub struct Vfs {
     fd_table: [Option<FdEntry>; MAX_FDS],
     next_fd: Fd,
-    devices: [(Option<&'static str>, Option<DeviceFactory>); 32],
+    // We use a fixed size array of boxed factories.
+    // Initialization is tricky with non-Copy types (Option<Box<...>>).
+    // usage of array_init or similar would be needed, or just Vec if we had it.
+    // For simplicity/no-deps, we will use a Vec which comes with alloc.
+    devices: alloc::vec::Vec<(&'static str, Box<dyn DeviceFactory>)>,
 }
 
 impl Default for Vfs {
@@ -18,11 +28,10 @@ impl Default for Vfs {
 impl Vfs {
     /// Create a new VFS instance
     pub const fn new() -> Self {
-        const NONE: (Option<&'static str>, Option<DeviceFactory>) = (None, None);
         Self {
-            fd_table: [None; MAX_FDS],
+            fd_table: [const { None }; MAX_FDS],
             next_fd: 3,
-            devices: [NONE; 32],
+            devices: alloc::vec::Vec::new(),
         }
     }
 
@@ -34,22 +43,24 @@ impl Vfs {
         Ok(())
     }
 
-    pub fn register_device(&mut self, path: &'static str, factory: DeviceFactory) -> VfsResult<()> {
-        for entry in &mut self.devices {
-            if entry.0.is_none() {
-                *entry = (Some(path), Some(factory));
-                return Ok(());
-            }
-        }
-        Err(-(libc::ENOMEM as isize))
+    pub fn register_device(
+        &mut self,
+        path: &'static str,
+        factory: Box<dyn DeviceFactory>,
+    ) -> VfsResult<()> {
+        self.devices.push((path, factory));
+        Ok(())
     }
 
     pub fn open(&mut self, path: &str, _flags: i32, _mode: u32) -> VfsResult<Fd> {
+        // Find factory
+        // We need to iterate and find match.
+        // Since we changed to Vec, we can iterate easily.
         let factory = self
             .devices
             .iter()
-            .find(|(p, _)| p.is_some_and(|device_path| device_path == path))
-            .and_then(|(_, f)| *f)
+            .find(|(p, _)| *p == path)
+            .map(|(_, f)| f)
             .ok_or(-(libc::ENOENT as isize))?;
 
         let mut found: Option<Fd> = None;
@@ -78,13 +89,14 @@ impl Vfs {
             3
         };
 
-        let entry = factory();
+        let device = factory.create();
+        let entry = FdEntry { device };
         self.fd_table[fd as usize] = Some(entry);
 
         Ok(fd)
     }
 
-    pub fn read(&self, fd: Fd, buf: *mut u8, count: usize) -> isize {
+    pub fn read(&mut self, fd: Fd, buf: *mut u8, count: usize) -> isize {
         if fd < 0 || fd as usize >= MAX_FDS {
             return -(libc::EBADF as isize);
         }
@@ -92,13 +104,16 @@ impl Vfs {
             return -(libc::EFAULT as isize);
         }
 
-        match self.fd_table[fd as usize] {
-            Some(entry) => (entry.ops.read)(entry.private_data, buf, count),
+        match self.fd_table[fd as usize].as_mut() {
+            Some(entry) => {
+                let user_buf = UserVoidPtr::new(buf as usize);
+                entry.device.read(user_buf, count)
+            }
             None => -(libc::EBADF as isize),
         }
     }
 
-    pub fn write(&self, fd: Fd, buf: *const u8, count: usize) -> isize {
+    pub fn write(&mut self, fd: Fd, buf: *const u8, count: usize) -> isize {
         if fd < 0 || fd as usize >= MAX_FDS {
             return -(libc::EBADF as isize);
         }
@@ -106,30 +121,37 @@ impl Vfs {
             return -(libc::EFAULT as isize);
         }
 
-        match self.fd_table[fd as usize] {
-            Some(entry) => (entry.ops.write)(entry.private_data, buf, count),
+        match self.fd_table[fd as usize].as_mut() {
+            Some(entry) => {
+                let user_buf = UserVoidPtr::new(buf as usize);
+                entry.device.write(user_buf, count)
+            }
             None => -(libc::EBADF as isize),
         }
     }
 
-    pub fn lseek(&self, fd: Fd, offset: isize, whence: i32) -> isize {
+    pub fn lseek(&mut self, fd: Fd, offset: isize, whence: i32) -> isize {
         if fd < 0 || fd as usize >= MAX_FDS {
             return -(libc::EBADF as isize);
         }
 
-        match self.fd_table[fd as usize] {
-            Some(entry) => (entry.ops.llseek)(entry.private_data, offset, whence),
+        match self.fd_table[fd as usize].as_mut() {
+            Some(entry) => entry.device.seek(offset, whence),
             None => -(libc::EBADF as isize),
         }
     }
 
-    pub fn ioctl(&self, fd: Fd, request: usize, arg: usize) -> isize {
+    pub fn ioctl(&mut self, fd: Fd, request: usize, raw_arg: usize) -> isize {
         if fd < 0 || fd as usize >= MAX_FDS {
             return -(libc::EBADF as isize);
         }
 
-        match self.fd_table[fd as usize] {
-            Some(entry) => (entry.ops.ioctl)(entry.private_data, request, arg),
+        match self.fd_table[fd as usize].as_mut() {
+            Some(entry) => {
+                let cmd = IoctlCommand::from_raw(request);
+                let arg = UserPtr::new(raw_arg);
+                entry.device.ioctl(cmd, arg)
+            }
             None => -(libc::EBADF as isize),
         }
     }
@@ -140,7 +162,7 @@ impl Vfs {
         }
 
         match self.fd_table[fd as usize].take() {
-            Some(entry) => (entry.ops.release)(entry.private_data),
+            Some(mut entry) => entry.device.release(),
             None => -(libc::EBADF as isize),
         }
     }
@@ -158,30 +180,32 @@ impl Vfs {
     }
 }
 
+// Global VFS instance
+// Note: We use GlobalCell (which behaves like a Mutex/RefCell) so we have interior mutability.
 static VFS: GlobalCell<Vfs> = GlobalCell::new(Vfs::new());
 
 pub fn register_fd(fd: Fd, entry: FdEntry) -> VfsResult<()> {
     VFS.with_mut(|vfs| vfs.register_fd(fd, entry))
 }
 
-pub fn register_device(path: &'static str, factory: DeviceFactory) -> VfsResult<()> {
+pub fn register_device(path: &'static str, factory: Box<dyn DeviceFactory>) -> VfsResult<()> {
     VFS.with_mut(|vfs| vfs.register_device(path, factory))
 }
 
 pub fn read(fd: Fd, buf: *mut u8, count: usize) -> isize {
-    VFS.with(|vfs| vfs.read(fd, buf, count))
+    VFS.with_mut(|vfs| vfs.read(fd, buf, count))
 }
 
 pub fn write(fd: Fd, buf: *const u8, count: usize) -> isize {
-    VFS.with(|vfs| vfs.write(fd, buf, count))
+    VFS.with_mut(|vfs| vfs.write(fd, buf, count))
 }
 
 pub fn lseek(fd: Fd, offset: isize, whence: i32) -> isize {
-    VFS.with(|vfs| vfs.lseek(fd, offset, whence))
+    VFS.with_mut(|vfs| vfs.lseek(fd, offset, whence))
 }
 
 pub fn ioctl(fd: Fd, request: usize, arg: usize) -> isize {
-    VFS.with(|vfs| vfs.ioctl(fd, request, arg))
+    VFS.with_mut(|vfs| vfs.ioctl(fd, request, arg))
 }
 
 pub fn close(fd: Fd) -> isize {
