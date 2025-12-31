@@ -1,5 +1,7 @@
 #![no_std]
 
+extern crate alloc;
+
 pub use foundation::ops::VfsOps;
 
 pub use libc::{
@@ -7,8 +9,10 @@ pub use libc::{
     S_IRUSR, S_IRWXG, S_IRWXO, S_IRWXU, S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR,
 };
 
+pub mod device;
 mod vfs;
 
+pub use device::*;
 pub use vfs::*;
 
 pub type Fd = i32;
