@@ -152,3 +152,9 @@ stamp-h1
 .libs/
 *.la
 *.lo
+
+# Compatibility with per-file VCS
+.history
+
+# Compatibility with locally generated documentation
+_doc

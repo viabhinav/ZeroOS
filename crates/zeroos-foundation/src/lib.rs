@@ -4,6 +4,7 @@ extern crate alloc;
 
 pub mod arch;
 pub mod entry;
+pub mod ioctl;
 pub mod kernel;
 pub mod kfn;
 pub mod ops;
