@@ -1,43 +1,31 @@
 #![no_std]
 
-use core::ptr::null_mut;
+extern crate alloc;
 
-use vfs_core::FileOps;
+use alloc::boxed::Box;
+use vfs_core::{Device, DeviceFactory, UserVoidPtr};
 
-fn urandom_read(_file: *mut u8, buf: *mut u8, count: usize) -> isize {
-    if count != 0 && buf.is_null() {
-        return -(libc::EFAULT as isize);
+pub struct UrandomDevice;
+
+impl Device for UrandomDevice {
+    fn read(&mut self, buf: UserVoidPtr, count: usize) -> isize {
+        if count != 0 && buf.is_null() {
+            return -(libc::EFAULT as isize);
+        }
+        // SAFETY: user_ptr checks check alignment (byte aligned for u8) and non-null (checked above).
+        // krandom assumes valid pointer.
+        unsafe { foundation::kfn::random::krandom(buf.as_ptr(), count) }
     }
-    unsafe { foundation::kfn::random::krandom(buf, count) }
 }
 
-fn urandom_write(_file: *mut u8, _buf: *const u8, _count: usize) -> isize {
-    -(libc::EBADF as isize)
-}
+pub struct UrandomFactory;
 
-fn urandom_close(_file: *mut u8) -> isize {
-    0
-}
-
-fn urandom_seek(_file: *mut u8, _offset: isize, _whence: i32) -> isize {
-    -(libc::ESPIPE as isize)
-}
-
-fn urandom_ioctl(_file: *mut u8, _request: usize, _arg: usize) -> isize {
-    -(libc::ENOTTY as isize)
-}
-
-pub const URANDOM_FOPS: FileOps = FileOps {
-    read: urandom_read,
-    write: urandom_write,
-    release: urandom_close,
-    llseek: urandom_seek,
-    ioctl: urandom_ioctl,
-};
-
-pub fn urandom_factory() -> vfs_core::FdEntry {
-    vfs_core::FdEntry {
-        ops: &URANDOM_FOPS,
-        private_data: null_mut(),
+impl DeviceFactory for UrandomFactory {
+    fn create(&self) -> Box<dyn Device> {
+        Box::new(UrandomDevice)
     }
+}
+
+pub fn make_urandom_factory() -> Box<dyn DeviceFactory> {
+    Box::new(UrandomFactory)
 }

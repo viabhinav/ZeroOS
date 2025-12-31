@@ -29,7 +29,7 @@ impl Vfs {
     /// Create a new VFS instance
     pub const fn new() -> Self {
         Self {
-            fd_table: [None; MAX_FDS],
+            fd_table: [const { None }; MAX_FDS],
             next_fd: 3,
             devices: alloc::vec::Vec::new(),
         }
