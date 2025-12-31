@@ -8,6 +8,7 @@ pub mod ioctl;
 pub mod kernel;
 pub mod kfn;
 pub mod ops;
+pub mod user_ptr;
 pub mod utils;
 
 pub use arch::SyscallFrame;
